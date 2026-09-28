@@ -6,6 +6,7 @@ import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import Product from './models/Product.js';
 import User from './models/User.js';
+import Order from './models/Order.js';
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ const sendEmail = async (to: string, subject: string, text: string, html?: strin
   try {
     const mailOptions = {
       from: `"Laiza Mart Pakistan" <${GMAIL_USER}>`,
+      replyTo: GMAIL_USER,
       to,
       subject,
       text,
@@ -211,7 +213,7 @@ Your order status with Laiza Mart has been updated.
 
 Order Number: ${order.orderId}
 Order Status: ${status} ✓
-PostEx Tracking Number: ${order.trackingNumber || 'Pending Dispatch'}
+Tracking Number: ${order.trackingNumber || 'Pending Dispatch'}
 Total Amount: Rs. ${order.total?.toLocaleString()} (${order.paymentMethod === 'cod' ? 'Cash on Delivery' : 'Prepaid Online'})
 
 Delivery Address:
@@ -224,7 +226,7 @@ Current Status: ${statusLabel}
 Items Ordered:
 ${order.items?.map((item: any) => `- ${item.product?.name} (${item.selectedColor}) x${item.quantity} = Rs. ${((item.product?.price || 0) * item.quantity).toLocaleString()}`).join('\n') || '- N/A'}
 
-Track live on: https://postex.pk/tracking
+Track live on: https://laizamart.pk/track
 
 Thank you for choosing Laiza Mart.
 We truly appreciate your trust and support. 🤍
@@ -284,7 +286,7 @@ Helpline / WhatsApp: 0308 9189245`;
         <strong style="font-family: monospace;">${order.orderId}</strong>
       </div>
       <div class="order-row">
-        <span>PostEx Tracking Number:</span>
+        <span>Tracking Number:</span>
         <strong style="font-family: monospace; color: #A88438;">${order.trackingNumber || 'Assigned on Dispatch'}</strong>
       </div>
       <div class="order-row">
@@ -301,7 +303,7 @@ Helpline / WhatsApp: 0308 9189245`;
       </div>
     </div>
 
-    <p>You can track your parcel live with PostEx courier anytime at <a href="https://postex.pk/tracking" style="color: #A88438;">postex.pk/tracking</a>.</p>
+    <p>You can track your parcel live anytime on our tracking page.</p>
 
     <div class="footer">
       <p style="font-size: 14px; font-weight: 500; color: #121212;">Thank you for choosing Laiza Mart.<br>We truly appreciate your trust and support. 🤍</p>
@@ -335,6 +337,81 @@ Helpline / WhatsApp: 0308 9189245`;
       message: 'Failed to dispatch order status update email',
       error: error.message
     });
+  }
+});
+
+// --- ORDER CRUD APIS ---
+
+// Get all orders (Admin)
+app.get('/api/orders', async (req, res) => {
+  try {
+    const orders = await Order.find().sort({ createdAt: -1 });
+    res.json({ success: true, orders });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Server Error', error: error.message });
+  }
+});
+
+// Get single order by orderId or phone
+app.get('/api/orders/lookup', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.status(400).json({ success: false, message: 'Query required' });
+    const query = (q as string).trim();
+    const digits = query.replace(/\D/g, '');
+    const order = await Order.findOne({
+      $or: [
+        { orderId: { $regex: new RegExp(`^${query}$`, 'i') } },
+        { trackingNumber: { $regex: new RegExp(`^${query}$`, 'i') } },
+        ...(digits.length >= 7 ? [{ phoneNumber: { $regex: digits } }] : [])
+      ]
+    });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    res.json({ success: true, order });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Server Error', error: error.message });
+  }
+});
+
+// Create new order
+app.post('/api/orders', async (req, res) => {
+  try {
+    const orderData = req.body;
+    const existing = await Order.findOne({ orderId: orderData.orderId });
+    if (existing) {
+      return res.status(200).json({ success: true, order: existing, message: 'Order already exists' });
+    }
+    const newOrder = new Order(orderData);
+    const saved = await newOrder.save();
+    res.status(201).json({ success: true, order: saved });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: 'Failed to save order', error: error.message });
+  }
+});
+
+// Update order status
+app.put('/api/orders/:orderId/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const updated = await Order.findOneAndUpdate(
+      { orderId: req.params.orderId },
+      { status },
+      { new: true }
+    );
+    if (!updated) return res.status(404).json({ success: false, message: 'Order not found' });
+    res.json({ success: true, order: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: 'Failed to update order status', error: error.message });
+  }
+});
+
+// Delete order
+app.delete('/api/orders/:orderId', async (req, res) => {
+  try {
+    await Order.findOneAndDelete({ orderId: req.params.orderId });
+    res.json({ success: true, message: 'Order deleted' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Server Error', error: error.message });
   }
 });
 
