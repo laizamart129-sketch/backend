@@ -2,8 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cors from 'cors';
-import nodemailer from 'nodemailer';
-import type { Transporter } from 'nodemailer';
+import { Resend } from 'resend';
 import Product from './models/Product.js';
 import User from './models/User.js';
 import Order from './models/Order.js';
@@ -16,56 +15,30 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 5000;
 app.use(cors());
 app.use(express.json());
 
-const GMAIL_USER = process.env.GMAIL_USER || 'laizamart129@gmail.com';
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || 'xyygsqngjnkrvcxt';
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const resend = new Resend(RESEND_API_KEY);
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'laizamart129@gmail.com';
 
-let transporter: Transporter | null = null;
-
-const initEmailTransporter = () => {
-  try {
-    transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: GMAIL_USER,
-        pass: GMAIL_APP_PASSWORD,
-      },
-    });
-    console.log('✅ Gmail SMTP transporter initialized successfully');
-  } catch (err) {
-    console.error('❌ Failed to initialize Gmail SMTP transporter:', err);
-    transporter = null;
-  }
-};
-
-initEmailTransporter();
-
 const sendEmail = async (to: string, subject: string, text: string, html?: string): Promise<boolean> => {
-  if (!transporter) {
-    console.warn('⚠️ Email transporter not available. Logging email instead:');
-    console.log(`--- EMAIL LOG ---`);
-    console.log(`To: ${to}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Body: ${text.substring(0, 300)}...`);
-    console.log(`-----------------`);
-    return true;
-  }
-
   try {
-    const mailOptions = {
-      from: `"Laiza Mart Pakistan" <${GMAIL_USER}>`,
-      replyTo: GMAIL_USER,
-      to,
-      subject,
-      text,
-      html: html || undefined,
-    };
+    const { data, error } = await resend.emails.send({
+      from: 'Laiza Mart Pakistan <onboarding@resend.dev>', // Update this to your verified domain later (e.g. info@laizamart.pk)
+      to: [to],
+      subject: subject,
+      html: html || text,
+      text: text,
+      replyTo: ADMIN_EMAIL
+    });
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email sent successfully to ${to}. Message ID: ${info.messageId}`);
+    if (error) {
+      console.error(`❌ Failed to send email to ${to}:`, error.message);
+      return false;
+    }
+
+    console.log(`✅ Email sent successfully to ${to}. Message ID: ${data?.id}`);
     return true;
   } catch (error: any) {
-    console.error(`❌ Failed to send email to ${to}:`, error.message);
+    console.error(`❌ Exception while sending email to ${to}:`, error.message);
     return false;
   }
 };
