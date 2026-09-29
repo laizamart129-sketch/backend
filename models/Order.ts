@@ -87,7 +87,6 @@ const OrderSchema: Schema = new Schema({
   timestamps: true
 });
 
-OrderSchema.index({ orderId: 1 });
 OrderSchema.index({ phoneNumber: 1 });
 OrderSchema.index({ status: 1 });
 

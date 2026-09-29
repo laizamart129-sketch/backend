@@ -41,7 +41,7 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'laizamart129@gmail.com';
 const sendEmail = async (to: string, subject: string, text: string, html?: string): Promise<boolean> => {
   try {
     const { data, error } = await resend.emails.send({
-      from: 'Laiza Mart Pakistan <onboarding@resend.dev>', // Update this to your verified domain later (e.g. info@laizamart.pk)
+      from: 'Laiza Mart Pakistan <noreply@laizamart.online>',
       to: [to],
       subject: subject,
       html: html || text,
