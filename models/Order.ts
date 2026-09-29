@@ -31,6 +31,11 @@ export interface IOrder extends Document {
   estimatedDelivery: string;
   courier: string;
   trackingNumber?: string;
+  postexStatus?: string;
+  postexTrackingHistory?: {
+    transactionStatusMessage?: string;
+    transactionStatusMessageCode?: string;
+  }[];
   status: 'Pending' | 'Processing' | 'Dispatched' | 'Delivered' | 'Cancelled';
   notes?: string;
   createdAt: Date;
@@ -67,6 +72,11 @@ const OrderSchema: Schema = new Schema({
   estimatedDelivery: { type: String },
   courier: { type: String, default: 'Standard Courier' },
   trackingNumber: { type: String },
+  postexStatus: { type: String },
+  postexTrackingHistory: [{
+    transactionStatusMessage: { type: String },
+    transactionStatusMessageCode: { type: String },
+  }],
   status: { 
     type: String, 
     enum: ['Pending', 'Processing', 'Dispatched', 'Delivered', 'Cancelled'], 

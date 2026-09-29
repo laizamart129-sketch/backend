@@ -6,14 +6,33 @@ import { Resend } from 'resend';
 import Product from './models/Product.js';
 import User from './models/User.js';
 import Order from './models/Order.js';
+import {
+  createPostExOrder,
+  getPostExAirwayBill,
+  getPostExPickupAddresses,
+  getPostExTracking,
+  normalizePakistaniPhone,
+  postExConfig,
+} from './services/postex.js';
 
 dotenv.config();
+dotenv.config({ path: process.env.POSTEX_ENV_FILE || 'postex.local.env' });
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 5000;
 
 app.use(cors());
 app.use(express.json());
+
+const postExStatusToStoreStatus = (postexStatus?: string) => {
+  const status = postexStatus?.toLowerCase() || '';
+  if (status.includes('deliver')) return 'Delivered';
+  if (status.includes('return')) return 'Cancelled';
+  if (status.includes('warehouse') || status.includes('delivery') || status.includes('picked') || status.includes('route') || status.includes('attempt')) {
+    return 'Dispatched';
+  }
+  return undefined;
+};
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const resend = new Resend(RESEND_API_KEY);
@@ -314,6 +333,131 @@ Helpline / WhatsApp: 0308 9189245`;
 });
 
 // --- ORDER CRUD APIS ---
+
+// PostEx configuration is intentionally limited to non-secret operational details.
+app.get('/api/postex/config', async (_req, res) => {
+  const config = postExConfig();
+  if (!config.configured) {
+    return res.status(200).json({
+      success: true,
+      configured: false,
+      message: 'PostEx API token is not configured on the server.',
+    });
+  }
+
+  try {
+    const addresses = await getPostExPickupAddresses();
+    const pickupAddressVerified = addresses.some(address => address.addressCode === config.pickupAddressCode);
+    return res.json({
+      success: true,
+      configured: true,
+      pickupAddressCode: config.pickupAddressCode,
+      operationalCity: config.operationalCity,
+      pickupAddressVerified,
+      message: pickupAddressVerified
+        ? 'PostEx account and pickup address are connected.'
+        : 'PostEx token is valid, but the configured pickup address code was not returned by PostEx.',
+    });
+  } catch (error: any) {
+    return res.status(502).json({
+      success: false,
+      configured: true,
+      message: error.message || 'Could not verify the PostEx account.',
+    });
+  }
+});
+
+app.post('/api/orders/:orderId/postex/book', async (req, res) => {
+  try {
+    const order = await Order.findOne({ orderId: req.params.orderId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+    if (order.paymentMethod !== 'cod') {
+      return res.status(400).json({ success: false, message: 'Only COD orders can be sent to PostEx.' });
+    }
+    if (order.trackingNumber && order.courier === 'PostEx') {
+      return res.status(409).json({ success: false, message: 'This order has already been sent to PostEx.', order });
+    }
+
+    const config = postExConfig();
+    if (!config.configured || !config.pickupAddressCode) {
+      return res.status(503).json({
+        success: false,
+        message: 'PostEx is not fully configured. Add the API token and pickup address code on the server.',
+      });
+    }
+
+    const detail = order.items
+      .map(item => `${item.product.name}${item.selectedColor ? ` (${item.selectedColor})` : ''} x${item.quantity}`)
+      .join(', ');
+    const postExOrder = await createPostExOrder({
+      orderRefNumber: order.orderId,
+      invoicePayment: order.total,
+      orderDetail: detail,
+      customerName: order.fullName,
+      customerPhone: normalizePakistaniPhone(order.phoneNumber),
+      deliveryAddress: order.address,
+      transactionNotes: order.notes || `Laiza Mart COD order ${order.orderId}`,
+      cityName: order.city,
+      invoiceDivision: 0,
+      items: Math.max(1, order.items.reduce((total, item) => total + item.quantity, 0)),
+      pickupAddressCode: config.pickupAddressCode,
+      orderType: 'Normal',
+    });
+
+    if (!postExOrder?.trackingNumber) {
+      return res.status(502).json({ success: false, message: 'PostEx did not return a tracking number for this order.' });
+    }
+
+    order.trackingNumber = postExOrder.trackingNumber;
+    order.courier = 'PostEx';
+    order.postexStatus = postExOrder.orderStatus || 'Unbooked';
+    order.status = 'Processing';
+    await order.save();
+    return res.json({ success: true, order, message: 'Order successfully sent to PostEx.' });
+  } catch (error: any) {
+    console.error('PostEx order booking failed:', error.message);
+    return res.status(502).json({ success: false, message: error.message || 'Could not send the order to PostEx.' });
+  }
+});
+
+app.post('/api/orders/:orderId/postex/refresh-tracking', async (req, res) => {
+  try {
+    const order = await Order.findOne({ orderId: req.params.orderId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+    if (order.courier !== 'PostEx' || !order.trackingNumber) {
+      return res.status(400).json({ success: false, message: 'This order has not been sent to PostEx yet.' });
+    }
+
+    const tracking = await getPostExTracking(order.trackingNumber);
+    order.postexStatus = tracking.transactionStatus || order.postexStatus;
+    order.postexTrackingHistory = tracking.transactionStatusHistory || order.postexTrackingHistory;
+    const mappedStatus = postExStatusToStoreStatus(tracking.transactionStatus);
+    if (mappedStatus) order.status = mappedStatus as typeof order.status;
+    await order.save();
+    return res.json({ success: true, order, tracking, message: 'PostEx tracking updated.' });
+  } catch (error: any) {
+    console.error('PostEx tracking refresh failed:', error.message);
+    return res.status(502).json({ success: false, message: error.message || 'Could not refresh PostEx tracking.' });
+  }
+});
+
+app.get('/api/orders/:orderId/postex/airway-bill', async (req, res) => {
+  try {
+    const order = await Order.findOne({ orderId: req.params.orderId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+    if (order.courier !== 'PostEx' || !order.trackingNumber) {
+      return res.status(400).json({ success: false, message: 'This order has not been sent to PostEx yet.' });
+    }
+
+    const pdf = await getPostExAirwayBill([order.trackingNumber]);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${order.trackingNumber}-airway-bill.pdf"`);
+    return res.send(pdf);
+  } catch (error: any) {
+    console.error('PostEx airway bill download failed:', error.message);
+    return res.status(502).json({ success: false, message: error.message || 'Could not generate the PostEx airway bill.' });
+  }
+});
 
 // Get all orders (Admin)
 app.get('/api/orders', async (req, res) => {
