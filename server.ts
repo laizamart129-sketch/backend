@@ -874,6 +874,226 @@ app.put('/api/auth/users/:id/role', async (req, res) => {
   }
 });
 
+// Forgot Password - Request OTP
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required',
+      });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Check if user exists in local cache
+    let foundUser = localUsers.find(u => u.email === cleanEmail);
+
+    // If not found in local cache and MongoDB is ready, check MongoDB
+    if (!foundUser && mongoose.connection.readyState === 1) {
+      try {
+        const dbUser = await User.findOne({ email: cleanEmail });
+        if (dbUser) {
+          foundUser = {
+            id: (dbUser._id as any).toString(),
+            fullName: dbUser.fullName,
+            email: dbUser.email,
+            password: dbUser.password,
+            phone: dbUser.phone,
+            role: dbUser.role,
+            createdAt: dbUser.createdAt,
+          };
+        }
+      } catch (err) {
+        console.warn('MongoDB lookup error:', err);
+      }
+    }
+
+    // For security, always return success even if user doesn't exist
+    // But only send email if user exists
+    if (foundUser) {
+      // Generate 4-digit OTP
+      const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+      console.log('==================================================');
+      console.log(`[USER PASSWORD RESET OTP] Code: ${otp}`);
+      console.log(`[Target Email]: ${cleanEmail}`);
+      console.log(`[Expiry]: 10 Minutes`);
+      console.log('==================================================');
+
+      const otpSent = await sendEmail(
+        cleanEmail,
+        `[Password Reset] Your verification code is ${otp} - Laiza Mart`,
+        `Your 4-digit verification code is: ${otp}`,
+        `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1a1a1a; background-color: #FAF8F5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background: #ffffff; border: 1px solid #EADDCE; padding: 32px; border-radius: 4px; }
+    .header { text-align: center; border-bottom: 2px solid #C5A059; padding-bottom: 20px; margin-bottom: 24px; }
+    .brand { font-size: 26px; font-weight: 300; letter-spacing: 4px; color: #121212; font-family: serif; text-transform: uppercase; }
+    .subtitle { font-size: 11px; letter-spacing: 2px; color: #C5A059; text-transform: uppercase; margin-top: 4px; }
+    .otp-box { background: #FAF8F5; border: 2px solid #C5A059; padding: 24px; margin: 24px 0; border-radius: 4px; text-align: center; }
+    .otp-code { font-size: 36px; font-weight: bold; color: #A88438; letter-spacing: 8px; font-family: monospace; }
+    .footer { text-align: center; margin-top: 32px; padding-top: 20px; border-top: 1px solid #EADDCE; font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="brand">LAIZA MART</div>
+      <div class="subtitle">Lahore, Pakistan — Online Exclusive</div>
+    </div>
+
+    <p style="font-size: 15px;">Hello,</p>
+    <p>We received a request to reset your password for your Laiza Mart account.</p>
+
+    <div class="otp-box">
+      <p style="font-size: 13px; color: #666; margin-bottom: 12px;">Your verification code is:</p>
+      <div class="otp-code">${otp}</div>
+    </div>
+
+    <p style="font-size: 13px; color: #666;">This code will expire in 10 minutes. If you didn't request this password reset, please ignore this email.</p>
+
+    <div class="footer">
+      <p style="margin-top: 12px; color: #888;">Warm regards,<br><strong>Laiza Mart</strong><br>Lahore, Pakistan — Online Exclusive<br>WhatsApp Concierge: 0308 9189245</p>
+    </div>
+  </div>
+</body>
+</html>`
+      );
+
+      // Store OTP in memory (in production, use Redis or database with expiry)
+      // For now, we'll store it in a simple object
+      if (!(global as any).otpStore) {
+        (global as any).otpStore = {};
+      }
+      (global as any).otpStore[cleanEmail] = {
+        otp,
+        expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+      };
+
+      return res.status(200).json({
+        success: true,
+        message: 'If an account exists with this email, a verification code has been sent.',
+        emailSent: otpSent,
+      });
+    }
+
+    // User doesn't exist, but return success for security
+    return res.status(200).json({
+      success: true,
+      message: 'If an account exists with this email, a verification code has been sent.',
+      emailSent: false,
+    });
+  } catch (error: any) {
+    console.error('Forgot password error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error during password reset request',
+      error: error.message,
+    });
+  }
+});
+
+// Verify OTP and Reset Password
+app.post('/api/auth/verify-otp', async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, OTP, and new password are required',
+      });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanOtp = otp.trim();
+    const cleanPassword = newPassword.trim();
+
+    if (cleanPassword.length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 4 characters long',
+      });
+    }
+
+    // Check OTP
+    if (!(global as any).otpStore) {
+      return res.status(400).json({
+        success: false,
+        message: 'No OTP request found. Please request a new OTP.',
+      });
+    }
+
+    const storedOtpData = (global as any).otpStore[cleanEmail];
+
+    if (!storedOtpData) {
+      return res.status(400).json({
+        success: false,
+        message: 'No OTP request found for this email. Please request a new OTP.',
+      });
+    }
+
+    if (Date.now() > storedOtpData.expiresAt) {
+      delete (global as any).otpStore[cleanEmail];
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new OTP.',
+      });
+    }
+
+    if (storedOtpData.otp !== cleanOtp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please check the code and try again.',
+      });
+    }
+
+    // OTP is valid, now update password
+    // Check in local cache first
+    let userIndex = localUsers.findIndex(u => u.email === cleanEmail);
+
+    if (userIndex !== -1) {
+      // Update in local cache
+      localUsers[userIndex].password = cleanPassword;
+    }
+
+    // Update in MongoDB if connected
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await User.findOneAndUpdate(
+          { email: cleanEmail },
+          { password: cleanPassword },
+          { new: true }
+        );
+      } catch (dbErr) {
+        console.warn('Could not update password in MongoDB:', dbErr);
+      }
+    }
+
+    // Clear OTP after successful reset
+    delete (global as any).otpStore[cleanEmail];
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password has been reset successfully. You can now log in with your new password.',
+    });
+  } catch (error: any) {
+    console.error('Verify OTP error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error during password reset',
+      error: error.message,
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
